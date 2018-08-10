@@ -1,4 +1,4 @@
-package mongostreams 
+package mongostreams
 
 type Configuration struct {
 	URI        string
