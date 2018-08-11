@@ -10,6 +10,8 @@ import (
 
 	"github.com/mongodb/mongo-go-driver/bson"
 	"github.com/mongodb/mongo-go-driver/mongo"
+	"github.com/mongodb/mongo-go-driver/mongo/changestreamopt"
+	"github.com/mongodb/mongo-go-driver/mongo/mongoopt"
 	"github.com/sbinet/go-python"
 	"github.com/tkanos/gonfig"
 )
@@ -29,11 +31,18 @@ func Execute(options Options) error {
 	err := gonfig.GetConf(options.Config, &config)
 
 	cacheFile := path.Join(options.Directory, "token.bson")
-	if _, err := os.Stat(cacheFile); os.IsExist(err) {
-		fmt.Println("resume token exists")
-	} else {
-		fmt.Println("creating resume token cache")
+	var watchOptions *changestreamopt.ChangeStreamBundle
+	if _, err := os.Stat(cacheFile); os.IsNotExist(err) {
+		watchOptions = changestreamopt.BundleChangeStream(changestreamopt.FullDocument(mongoopt.Default))
+		fmt.Println("Creating resume token cache")
 		os.Create(cacheFile)
+	} else {
+		fmt.Println("Resume token exists, loading:")
+		token := loadResumeToken(cacheFile)
+		watchOptions = changestreamopt.BundleChangeStream(
+			changestreamopt.ResumeAfter(token),
+			changestreamopt.FullDocument(mongoopt.Default),
+		)
 	}
 
 	client, err := mongo.NewClient(config.URI)
@@ -48,7 +57,7 @@ func Execute(options Options) error {
 
 	database := client.Database(config.Database)
 	collection := database.Collection(config.Collection)
-	cursor, err := collection.Watch(context.Background(), nil)
+	cursor, err := collection.Watch(context.Background(), nil, watchOptions)
 
 	if err != nil {
 		log.Fatal(err)
@@ -72,7 +81,7 @@ func Execute(options Options) error {
 			log.Fatal(err)
 		}
 
-		go cacheResumeToken(cacheFile, doc)
+		saveResumeToken(cacheFile, doc)
 		channelStreams <- *doc
 	}
 
@@ -84,19 +93,6 @@ func Execute(options Options) error {
 func getNextChange(cursor mongo.Cursor) {
 	for !cursor.Next(context.Background()) {
 	}
-}
-
-func cacheResumeToken(cacheFile string, doc *bson.Document) {
-	token := doc.Lookup("_id").MutableDocument()
-	file, err := os.OpenFile(cacheFile, os.O_WRONLY, os.ModeAppend)
-	if err == nil {
-		cache, err := token.MarshalBSON()
-		_, err = file.Write(cache)
-		if err != nil {
-			panic(err)
-		}
-	}
-	file.Close()
 }
 
 func initiateActionHandler(directory string) *PyActions {
