@@ -3,12 +3,15 @@ package mongostreams
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"path"
+	"sync"
+
 	"github.com/mongodb/mongo-go-driver/bson"
 	"github.com/mongodb/mongo-go-driver/mongo"
 	"github.com/sbinet/go-python"
 	"github.com/tkanos/gonfig"
-	"log"
-	"sync"
 )
 
 func init() {
@@ -24,6 +27,14 @@ func Execute(options Options) error {
 
 	config := Configuration{}
 	err := gonfig.GetConf(options.Config, &config)
+
+	cacheFile := path.Join(options.Directory, "token.bson")
+	if _, err := os.Stat(cacheFile); os.IsExist(err) {
+		fmt.Println("resume token exists")
+	} else {
+		fmt.Println("creating resume token cache")
+		os.Create(cacheFile)
+	}
 
 	client, err := mongo.NewClient(config.URI)
 	if err != nil {
@@ -57,14 +68,12 @@ func Execute(options Options) error {
 		getNextChange(cursor)
 		doc := bson.NewDocument()
 		err := cursor.Decode(doc)
-		if err != nil {log.Fatal(err)}
-		
-		cacheResumeToken(doc)
-		channelStreams <- *doc
-	}
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	if err := cursor.Err(); err != nil {
-		log.Fatal(err)
+		go cacheResumeToken(cacheFile, doc)
+		channelStreams <- *doc
 	}
 
 	wg.Wait()
@@ -77,8 +86,17 @@ func getNextChange(cursor mongo.Cursor) {
 	}
 }
 
-func cacheResumeToken(doc *bson.Document) {
-	fmt.Println("Storing ", doc.Lookup("_id"))
+func cacheResumeToken(cacheFile string, doc *bson.Document) {
+	token := doc.Lookup("_id").MutableDocument()
+	file, err := os.OpenFile(cacheFile, os.O_WRONLY, os.ModeAppend)
+	if err == nil {
+		cache, err := token.MarshalBSON()
+		_, err = file.Write(cache)
+		if err != nil {
+			panic(err)
+		}
+	}
+	file.Close()
 }
 
 func initiateActionHandler(directory string) *PyActions {
@@ -143,7 +161,7 @@ func actionHandler(channelStreams <-chan bson.Document, wg *sync.WaitGroup, acti
 			res := actions.OnInvalidate.Call(args, python.Py_None)
 			fmt.Println(python.PyInt_AsLong(res))
 		default:
-			fmt.Println("Unknown event type:", event)	
+			fmt.Println("Unknown event type:", event)
 		}
 
 		args.DecRef()
