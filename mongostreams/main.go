@@ -1,18 +1,20 @@
-package main 
+package main
 
 import (
+	"fmt"
 	"github.com/akamensky/argparse"
 	"github.com/sindbach/mongostreams"
-	"os"
 	"log"
-	"fmt"
+	"os"
 )
 
 func main() {
 	parser := argparse.NewParser("mongostreams", " ... ")
 
-	dirPtr := parser.String("d", "directory", &argparse.Options{Required: true, Help: "Specify a working directory"})
-	configPtr := parser.String("c", "config", &argparse.Options{Required: true, Help: "Specify a configuration JSON file"})
+	dirPtr := parser.String("d", "directory", &argparse.Options{Required: true,
+		Help: "Specify a working directory"})
+	configPtr := parser.String("c", "config", &argparse.Options{Required: true,
+		Help: "Specify a configuration JSON file"})
 	err := parser.Parse(os.Args)
 	if err != nil {
 		fmt.Print(parser.Usage(err))
@@ -24,11 +26,10 @@ func main() {
 	}
 	if _, err := os.Stat(options.Config); os.IsNotExist(err) {
 		log.Fatal("Configuration file is unreachable.")
-	}	
+	}
 	err = mongostreams.Execute(options)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("Done")
 }
-
