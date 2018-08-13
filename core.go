@@ -22,7 +22,7 @@ func Execute(options Options) error {
 	config := Configuration{}
 	err := gonfig.GetConf(options.Config, &config)
 
-	cacheFile := path.Join(options.Directory, "token.bson")
+	cacheFile := path.Join(options.Directory, TokenFile)
 	var watchOptions *changestreamopt.ChangeStreamBundle
 	if _, err := os.Stat(cacheFile); os.IsNotExist(err) {
 		watchOptions = changestreamopt.BundleChangeStream(changestreamopt.FullDocument(mongoopt.Default))
@@ -73,7 +73,6 @@ func Execute(options Options) error {
 		if err != nil {
 			log.Fatal(err)
 		}
-
 		saveResumeToken(cacheFile, doc)
 		channelStreams <- *doc
 	}
@@ -89,7 +88,7 @@ func getNextChange(cursor mongo.Cursor) {
 }
 
 func initiateActionHandler(directory string) *otto.Otto {
-	f, err := os.Open(path.Join(directory, "actions.js"))
+	f, err := os.Open(path.Join(directory, PluginFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
