@@ -1,6 +1,7 @@
 package mongostreams
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -12,20 +13,11 @@ import (
 	"github.com/mongodb/mongo-go-driver/mongo"
 	"github.com/mongodb/mongo-go-driver/mongo/changestreamopt"
 	"github.com/mongodb/mongo-go-driver/mongo/mongoopt"
-	"github.com/sbinet/go-python"
+	"github.com/robertkrimen/otto"
 	"github.com/tkanos/gonfig"
 )
 
-func init() {
-	err := python.Initialize()
-	if err != nil {
-		panic(err.Error())
-	}
-}
-
 func Execute(options Options) error {
-
-	actions := initiateActionHandler(options.Directory)
 
 	config := Configuration{}
 	err := gonfig.GetConf(options.Config, &config)
@@ -66,6 +58,7 @@ func Execute(options Options) error {
 	channelStreams := make(chan bson.Document)
 
 	wg := new(sync.WaitGroup)
+	actions := initiateActionHandler(options.Directory)
 
 	for w := 1; w <= config.Workers; w++ {
 		wg.Add(1)
@@ -95,71 +88,70 @@ func getNextChange(cursor mongo.Cursor) {
 	}
 }
 
-func initiateActionHandler(directory string) *PyActions {
-	sysPath := python.PySys_GetObject("path")
-	programName := python.PyString_FromString(directory)
-	err := python.PyList_Append(sysPath, programName)
+func initiateActionHandler(directory string) *otto.Otto {
+	f, err := os.Open(path.Join(directory, "actions.js"))
 	if err != nil {
-		panic(err.Error())
+		if os.IsNotExist(err) {
+			return nil
+		}
+		log.Fatal(err)
 	}
+	defer f.Close()
+	buff := bytes.NewBuffer(nil)
 
-	moduleTest := python.PyImport_ImportModule("actions")
-	if moduleTest == nil {
-		python.PyErr_Print()
-		panic("Couldn't import `actions` module.")
+	if _, err := buff.ReadFrom(f); err != nil {
+		log.Fatal(err)
 	}
-	actions := PyActions{}
-	actions.OnInsert = moduleTest.GetAttrString("on_insert")
-	if actions.OnInsert == nil {
-		panic("Couldn't find `on_insert()` from module.")
+	runtime := otto.New()
+
+	if _, err := runtime.Run(buff.String()); err != nil {
+		log.Fatal(err)
 	}
-	actions.OnUpdate = moduleTest.GetAttrString("on_update")
-	if actions.OnUpdate == nil {
-		panic("Couldn't find `on_update()` from module.")
-	}
-	actions.OnReplace = moduleTest.GetAttrString("on_replace")
-	if actions.OnReplace == nil {
-		panic("Couldn't find `on_replace()` from module.")
-	}
-	actions.OnDelete = moduleTest.GetAttrString("on_delete")
-	if actions.OnDelete == nil {
-		panic("Couldn't find `on_delete()` from module.")
-	}
-	actions.OnInvalidate = moduleTest.GetAttrString("on_invalidate")
-	if actions.OnInvalidate == nil {
-		panic("Couldn't find `on_invalidate()` from module.")
-	}
-	return &actions
+	return runtime
+
 }
 
-func actionHandler(channelStreams <-chan bson.Document, wg *sync.WaitGroup, actions *PyActions) {
+func actionHandler(channelStreams <-chan bson.Document, wg *sync.WaitGroup, actions *otto.Otto) {
 	defer wg.Done()
-
 	for doc := range channelStreams {
-		args := python.PyTuple_New(1)
-		python.PyTuple_SetItem(args, 0, python.PyString_FromString(doc.ToExtJSON(true)))
-
+		d, err := actions.ToValue(doc.ToExtJSON(true))
+		if err != nil {
+			log.Fatal(err)
+		}
 		operationType := doc.Lookup("operationType")
 		switch event := operationType.StringValue(); event {
 		case "insert":
-			res := actions.OnInsert.Call(args, python.Py_None)
-			fmt.Println(python.PyInt_AsLong(res))
+			result, err := actions.Call("onInsert", nil, d)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println(result.ToBoolean())
 		case "update":
-			res := actions.OnUpdate.Call(args, python.Py_None)
-			fmt.Println(python.PyInt_AsLong(res))
+			result, err := actions.Call("onUpdate", nil, d)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println(result.ToBoolean())
 		case "replace":
-			res := actions.OnReplace.Call(args, python.Py_None)
-			fmt.Println(python.PyInt_AsLong(res))
+			result, err := actions.Call("onReplace", nil, d)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println(result.ToBoolean())
 		case "delete":
-			res := actions.OnDelete.Call(args, python.Py_None)
-			fmt.Println(python.PyInt_AsLong(res))
+			result, err := actions.Call("onDelete", nil, d)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println(result.ToBoolean())
 		case "invalidate":
-			res := actions.OnInvalidate.Call(args, python.Py_None)
-			fmt.Println(python.PyInt_AsLong(res))
+			result, err := actions.Call("onInvalidate", nil, d)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println(result.ToBoolean())
 		default:
 			fmt.Println("Unknown event type:", event)
 		}
-
-		args.DecRef()
 	}
 }
