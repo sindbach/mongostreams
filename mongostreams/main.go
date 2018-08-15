@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/akamensky/argparse"
-	"github.com/sindbach/mongostreams"
 	"log"
 	"os"
+
+	"github.com/akamensky/argparse"
+	"github.com/sindbach/mongostreams"
 )
 
 func main() {

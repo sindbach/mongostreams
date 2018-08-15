@@ -1,4 +1,4 @@
 package mongostreams
 
-const TokenFile = "token.bson"
-const PluginFile = "plugin.js"
+const tokenFile = "token.bson"
+const pluginFile = "plugin.js"

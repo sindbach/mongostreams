@@ -19,10 +19,10 @@ import (
 
 func Execute(options Options) error {
 
-	config := Configuration{}
+	config := configuration{}
 	err := gonfig.GetConf(options.Config, &config)
 
-	cacheFile := path.Join(options.Directory, TokenFile)
+	cacheFile := path.Join(options.Directory, tokenFile)
 	var watchOptions *changestreamopt.ChangeStreamBundle
 	if _, err := os.Stat(cacheFile); os.IsNotExist(err) {
 		watchOptions = changestreamopt.BundleChangeStream(changestreamopt.FullDocument(mongoopt.Default))
@@ -88,7 +88,7 @@ func getNextChange(cursor mongo.Cursor) {
 }
 
 func initiateActionHandler(directory string) *otto.Otto {
-	f, err := os.Open(path.Join(directory, PluginFile))
+	f, err := os.Open(path.Join(directory, pluginFile))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

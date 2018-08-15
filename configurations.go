@@ -1,6 +1,6 @@
 package mongostreams
 
-type Configuration struct {
+type configuration struct {
 	URI        string
 	Database   string
 	Collection string
