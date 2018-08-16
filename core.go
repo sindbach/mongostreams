@@ -1,24 +1,28 @@
 package mongostreams
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"path"
-	"sync"
 
 	"github.com/mongodb/mongo-go-driver/bson"
 	"github.com/mongodb/mongo-go-driver/mongo"
 	"github.com/mongodb/mongo-go-driver/mongo/changestreamopt"
 	"github.com/mongodb/mongo-go-driver/mongo/mongoopt"
-	"github.com/robertkrimen/otto"
+	"github.com/sbinet/go-python"
 	"github.com/tkanos/gonfig"
 )
 
-func Execute(options Options) error {
+func init() {
+	err := python.Initialize()
+	if err != nil {
+		panic(err.Error())
+	}
+}
 
+func Execute(options Options) error {
 	config := configuration{}
 	err := gonfig.GetConf(options.Config, &config)
 
@@ -29,14 +33,13 @@ func Execute(options Options) error {
 		fmt.Println("Creating resume token cache")
 		os.Create(cacheFile)
 	} else {
-		fmt.Println("Resume token exists, loading:")
+		fmt.Println("Resume token exists, loading ...")
 		token := loadResumeToken(cacheFile)
 		watchOptions = changestreamopt.BundleChangeStream(
 			changestreamopt.ResumeAfter(token),
 			changestreamopt.FullDocument(mongoopt.Default),
 		)
 	}
-
 	client, err := mongo.NewClient(config.URI)
 	if err != nil {
 		log.Fatal(err)
@@ -55,15 +58,7 @@ func Execute(options Options) error {
 		log.Fatal(err)
 	}
 
-	channelStreams := make(chan bson.Document)
-
-	wg := new(sync.WaitGroup)
-	actions := initiateActionHandler(options.Directory)
-
-	for w := 1; w <= config.Workers; w++ {
-		wg.Add(1)
-		go actionHandler(channelStreams, wg, actions)
-	}
+	pluginModule := initiateActionHandler(options.Directory)
 
 	fmt.Println("Waiting for incoming change streams ...")
 	for {
@@ -74,11 +69,9 @@ func Execute(options Options) error {
 			log.Fatal(err)
 		}
 		saveResumeToken(cacheFile, doc)
-		channelStreams <- *doc
+		actionHandler(doc, *pluginModule)
 	}
 
-	wg.Wait()
-	close(channelStreams)
 	return nil
 }
 
@@ -87,70 +80,64 @@ func getNextChange(cursor mongo.Cursor) {
 	}
 }
 
-func initiateActionHandler(directory string) *otto.Otto {
-	f, err := os.Open(path.Join(directory, pluginFile))
+func initiateActionHandler(directory string) *python.PyObject {
+	sysPath := python.PySys_GetObject("path")
+	programName := python.PyString_FromString(directory)
+	err := python.PyList_Append(sysPath, programName)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		log.Fatal(err)
+		panic(err.Error())
 	}
-	defer f.Close()
-	buff := bytes.NewBuffer(nil)
-
-	if _, err := buff.ReadFrom(f); err != nil {
-		log.Fatal(err)
+	pluginModule := python.PyImport_ImportModule(pluginFile)
+	if pluginModule == nil {
+		python.PyErr_Print()
+		panic("Couldn't import `actions` module.")
 	}
-	runtime := otto.New()
-
-	if _, err := runtime.Run(buff.String()); err != nil {
-		log.Fatal(err)
-	}
-	return runtime
-
+	return pluginModule
 }
 
-func actionHandler(channelStreams <-chan bson.Document, wg *sync.WaitGroup, actions *otto.Otto) {
-	defer wg.Done()
-	for doc := range channelStreams {
-		d, err := actions.ToValue(doc.ToExtJSON(true))
-		if err != nil {
-			log.Fatal(err)
+func actionHandler(doc *bson.Document, module python.PyObject) {
+	args := python.PyTuple_New(1)
+	python.PyTuple_SetItem(args, 0, python.PyString_FromString(doc.ToExtJSON(true)))
+
+	operationType := doc.Lookup("operationType")
+	switch event := operationType.StringValue(); event {
+	case "insert":
+		insert := module.GetAttrString("on_insert")
+		if insert == nil {
+			panic("Couldn't find `on_insert()` from module.")
 		}
-		operationType := doc.Lookup("operationType")
-		switch event := operationType.StringValue(); event {
-		case "insert":
-			result, err := actions.Call("onInsert", nil, d)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Println(result.ToBoolean())
-		case "update":
-			result, err := actions.Call("onUpdate", nil, d)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Println(result.ToBoolean())
-		case "replace":
-			result, err := actions.Call("onReplace", nil, d)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Println(result.ToBoolean())
-		case "delete":
-			result, err := actions.Call("onDelete", nil, d)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Println(result.ToBoolean())
-		case "invalidate":
-			result, err := actions.Call("onInvalidate", nil, d)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Println(result.ToBoolean())
-		default:
-			fmt.Println("Unknown event type:", event)
+		res := insert.Call(args, python.Py_None)
+		fmt.Println(python.PyInt_AsLong(res))
+	case "update":
+		update := module.GetAttrString("on_update")
+		if update == nil {
+			panic("Couldn't find `on_update()` from module.")
 		}
+		res := update.Call(args, python.Py_None)
+		fmt.Println(python.PyInt_AsLong(res))
+	case "replace":
+		replace := module.GetAttrString("on_replace")
+		if replace == nil {
+			panic("Couldn't find `on_replace()` from module.")
+		}
+		res := replace.Call(args, python.Py_None)
+		fmt.Println(python.PyInt_AsLong(res))
+	case "delete":
+		delete := module.GetAttrString("on_delete")
+		if delete == nil {
+			panic("Couldn't find `on_delete()` from module.")
+		}
+		res := delete.Call(args, python.Py_None)
+		fmt.Println(python.PyInt_AsLong(res))
+	case "invalidate":
+		invalidate := module.GetAttrString("on_invalidate")
+		if invalidate == nil {
+			panic("Couldn't find `on_invalidate()` from module.")
+		}
+		res := invalidate.Call(args, python.Py_None)
+		fmt.Println(python.PyInt_AsLong(res))
+	default:
+		fmt.Println("Unknown event type:", event)
 	}
+
 }
