@@ -2,7 +2,6 @@ package mongostreams
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"path"
@@ -13,16 +12,23 @@ import (
 	"github.com/mongodb/mongo-go-driver/mongo/mongoopt"
 	"github.com/sbinet/go-python"
 	"github.com/tkanos/gonfig"
+	"go.uber.org/zap"
 )
+
+var logger *zap.SugaredLogger
 
 func init() {
 	err := python.Initialize()
 	if err != nil {
 		panic(err.Error())
 	}
+	zlog := zap.NewExample()
+	defer zlog.Sync()
+	logger = zlog.Sugar()
 }
 
 func Execute(options Options) error {
+
 	config := configuration{}
 	err := gonfig.GetConf(options.Config, &config)
 
@@ -30,10 +36,10 @@ func Execute(options Options) error {
 	var watchOptions *changestreamopt.ChangeStreamBundle
 	if _, err := os.Stat(cacheFile); os.IsNotExist(err) {
 		watchOptions = changestreamopt.BundleChangeStream(changestreamopt.FullDocument(mongoopt.Default))
-		fmt.Println("Creating resume token cache")
+		logger.Info("Creating resume token cache ")
 		os.Create(cacheFile)
 	} else {
-		fmt.Println("Resume token exists, loading ...")
+		logger.Info("Resume token cache found")
 		token := loadResumeToken(cacheFile)
 		watchOptions = changestreamopt.BundleChangeStream(
 			changestreamopt.ResumeAfter(token),
@@ -42,25 +48,27 @@ func Execute(options Options) error {
 	}
 	client, err := mongo.NewClient(config.URI)
 	if err != nil {
-		log.Fatal(err)
+		logger.Infof("Failed to create a new MongoClient",
+			"err", err, "uri", config.URI)
 	}
 
 	err = client.Connect(context.TODO())
 	if err != nil {
-		log.Fatal(err)
+		logger.Infof("Failed to connect to MongoDB",
+			"err", err, "uri", config.URI)
 	}
 
 	database := client.Database(config.Database)
 	collection := database.Collection(config.Collection)
 	cursor, err := collection.Watch(context.Background(), nil, watchOptions)
-
 	if err != nil {
-		log.Fatal(err)
+		logger.Infof("Failed to open ChangeStream",
+			"err", err, "collection", config.Collection)
 	}
 
-	pluginModule := initiateActionHandler(options.Directory)
+	initiateActionHandler(options.Directory)
 
-	fmt.Println("Waiting for incoming change streams ...")
+	logger.Info("Waiting for incoming change streams ...")
 	for {
 		getNextChange(cursor)
 		doc := bson.NewDocument()
@@ -69,7 +77,7 @@ func Execute(options Options) error {
 			log.Fatal(err)
 		}
 		saveResumeToken(cacheFile, doc)
-		actionHandler(doc, *pluginModule)
+		actionHandler(doc)
 	}
 
 	return nil
@@ -80,22 +88,23 @@ func getNextChange(cursor mongo.Cursor) {
 	}
 }
 
-func initiateActionHandler(directory string) *python.PyObject {
+func initiateActionHandler(directory string) {
 	sysPath := python.PySys_GetObject("path")
 	programName := python.PyString_FromString(directory)
 	err := python.PyList_Append(sysPath, programName)
 	if err != nil {
 		panic(err.Error())
 	}
-	pluginModule := python.PyImport_ImportModule(pluginFile)
-	if pluginModule == nil {
-		python.PyErr_Print()
-		panic("Couldn't import `actions` module.")
-	}
-	return pluginModule
 }
 
-func actionHandler(doc *bson.Document, module python.PyObject) {
+func actionHandler(doc *bson.Document) {
+	module := python.PyImport_ImportModule(pluginFile)
+	if module == nil {
+		python.PyErr_Print()
+		logger.Infof("Failed to import plugin module",
+			"file", pluginFile)
+	}
+
 	args := python.PyTuple_New(1)
 	python.PyTuple_SetItem(args, 0, python.PyString_FromString(doc.ToExtJSON(true)))
 
@@ -104,40 +113,40 @@ func actionHandler(doc *bson.Document, module python.PyObject) {
 	case "insert":
 		insert := module.GetAttrString("on_insert")
 		if insert == nil {
-			panic("Couldn't find `on_insert()` from module.")
+			logger.Infof("Failed to find 'on_insert()' from plugin")
 		}
 		res := insert.Call(args, python.Py_None)
-		fmt.Println(python.PyInt_AsLong(res))
+		logger.Info(python.PyInt_AsLong(res))
 	case "update":
 		update := module.GetAttrString("on_update")
 		if update == nil {
-			panic("Couldn't find `on_update()` from module.")
+			logger.Infof("Failed to find 'on_update()' from plugin")
 		}
 		res := update.Call(args, python.Py_None)
-		fmt.Println(python.PyInt_AsLong(res))
+		logger.Info(python.PyInt_AsLong(res))
 	case "replace":
 		replace := module.GetAttrString("on_replace")
 		if replace == nil {
-			panic("Couldn't find `on_replace()` from module.")
+			logger.Infof("Failed to find 'on_replace()' from plugin")
 		}
 		res := replace.Call(args, python.Py_None)
-		fmt.Println(python.PyInt_AsLong(res))
+		logger.Info(python.PyInt_AsLong(res))
 	case "delete":
 		delete := module.GetAttrString("on_delete")
 		if delete == nil {
-			panic("Couldn't find `on_delete()` from module.")
+			logger.Infof("Failed to find 'on_delete()' from plugin")
 		}
 		res := delete.Call(args, python.Py_None)
-		fmt.Println(python.PyInt_AsLong(res))
+		logger.Info(python.PyInt_AsLong(res))
 	case "invalidate":
 		invalidate := module.GetAttrString("on_invalidate")
 		if invalidate == nil {
-			panic("Couldn't find `on_invalidate()` from module.")
+			logger.Infof("Failed to find 'on_invalidate()' from plugin")
 		}
 		res := invalidate.Call(args, python.Py_None)
-		fmt.Println(python.PyInt_AsLong(res))
+		logger.Info(python.PyInt_AsLong(res))
 	default:
-		fmt.Println("Unknown event type:", event)
+		logger.Infow("Failed to unknown event type encountered",
+			"event", event)
 	}
-
 }
